@@ -19,6 +19,7 @@ import (
 	"errors"
 	"time"
 
+	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
@@ -95,14 +96,25 @@ func initWithRetry(ctx context.Context, component string, init func(context.Cont
 	}
 }
 
-// newCacheNamespaces scopes a manager cache to the watched namespaces.
+// newCacheNamespaces scopes a manager cache to the watched namespaces, or returns nil for
+// cluster-wide watching.
 //
 // GetCacheNamespaces returns exact namespace names when all configured watch namespaces are valid
 // DNS labels, enabling per-namespace cache scoping. It falls back to NamespaceAll when the include
 // list is unset or any watch namespace is a regexp pattern (the controllers' Reconcile guard
-// handles filtering in that case). ByObject entries that leave Namespaces nil inherit this scoping.
+// handles filtering in that case). A nil return leaves DefaultNamespaces unset, giving a normal
+// cluster-wide cache. ByObject entries that leave Namespaces nil inherit this scoping.
 func newCacheNamespaces(cacheNamespaces []string) map[string]cache.Config {
-	defaultNamespaces := make(map[string]cache.Config)
+	if len(cacheNamespaces) == 0 {
+		return nil
+	}
+	for _, ns := range cacheNamespaces {
+		// controller-runtime v0.18 multi-namespace cache does not fall back to "" on List; nil gives a cluster-wide cache.
+		if ns == meta.NamespaceAll {
+			return nil
+		}
+	}
+	defaultNamespaces := make(map[string]cache.Config, len(cacheNamespaces))
 	for _, ns := range cacheNamespaces {
 		defaultNamespaces[ns] = cache.Config{}
 	}
