@@ -21,9 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/wait"
+	ctrlCache "sigs.k8s.io/controller-runtime/pkg/cache"
 
+	"github.com/altinity/clickhouse-operator/pkg/model/chbackup"
 	"github.com/altinity/clickhouse-operator/pkg/util"
 )
 
@@ -217,4 +220,60 @@ func TestInitRetryBackoffSchedule(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, backoff.Step(), time.Duration(float64(backoff.Cap)*0.5),
 		"the steady-state delay must stay near the cap, not decay back to rapid retries")
+}
+
+func TestNewCacheNamespaces(t *testing.T) {
+	require.Nil(t, newCacheNamespaces(nil))
+	require.Nil(t, newCacheNamespaces([]string{""}))
+	require.Nil(t, newCacheNamespaces([]string{"a", ""}))
+
+	got := newCacheNamespaces([]string{"a", "b"})
+	require.NotNil(t, got)
+	require.Len(t, got, 2)
+	require.Equal(t, map[string]ctrlCache.Config{
+		"a": {},
+		"b": {},
+	}, got)
+}
+
+func TestNewBackupCacheOptionsClusterWide(t *testing.T) {
+	opts := newBackupCacheOptions(logr.Discard(), []string{""})
+	require.Nil(t, opts.DefaultNamespaces, "DefaultNamespaces must be nil when watching all namespaces")
+
+	// Verify ByObject is unchanged compared to scoped cache options.
+	scopedOpts := newBackupCacheOptions(logr.Discard(), []string{"ns1", "ns2"})
+	require.NotNil(t, scopedOpts.DefaultNamespaces)
+
+	narrowed := map[string]ctrlCache.ByObject{}
+	for obj, byObject := range opts.ByObject {
+		narrowed[fmt.Sprintf("%T", obj)] = byObject
+	}
+	expectedNarrowed := map[string]ctrlCache.ByObject{}
+	for obj, byObject := range scopedOpts.ByObject {
+		expectedNarrowed[fmt.Sprintf("%T", obj)] = byObject
+	}
+
+	require.Equal(t, len(expectedNarrowed), len(narrowed))
+	require.Len(t, narrowed, 3)
+
+	for _, typeName := range []string{"*v1.Job", "*v1.CronJob"} {
+		byObject, ok := narrowed[typeName]
+		require.True(t, ok, "%s must be present in ByObject", typeName)
+		require.Equal(t, chbackup.JobSelector().String(), byObject.Label.String())
+		require.Nil(t, byObject.Namespaces, "%s must leave Namespaces nil", typeName)
+	}
+
+	installations, ok := narrowed["*v1.ClickHouseInstallation"]
+	require.True(t, ok, "*v1.ClickHouseInstallation must be present in ByObject")
+	require.Nil(t, installations.Label)
+	require.Nil(t, installations.Namespaces)
+	require.NotNil(t, installations.Transform)
+
+	for typeName, expectedBO := range expectedNarrowed {
+		actualBO, ok := narrowed[typeName]
+		require.True(t, ok)
+		require.Equal(t, expectedBO.Label, actualBO.Label)
+		require.Equal(t, expectedBO.Namespaces, actualBO.Namespaces)
+		require.Equal(t, expectedBO.Transform != nil, actualBO.Transform != nil)
+	}
 }
